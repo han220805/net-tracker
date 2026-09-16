@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
-import { Search, Trash2, Globe, Clock, AppWindow, ArrowDownUp, Check, Copy } from "lucide-vue-next";
+import { Search, Trash2, Globe, Clock, AppWindow, Check, Copy } from "lucide-vue-next";
 import Card from "@/components/ui/Card.vue";
 import Input from "@/components/ui/Input.vue";
 import Button from "@/components/ui/Button.vue";
