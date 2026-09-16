@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
-import { Search, Trash2, Globe, Clock, AppWindow, Check, Copy } from "lucide-vue-next";
+import { Search, Trash2, Globe, Clock, AppWindow, Check, Copy, CalendarDays } from "lucide-vue-next";
 import Card from "@/components/ui/Card.vue";
 import Input from "@/components/ui/Input.vue";
 import Button from "@/components/ui/Button.vue";
@@ -19,6 +19,19 @@ const historySearch = ref("");
 const selectedAppFilter = ref<string>("ALL");
 const copiedIp = ref<string | null>(null);
 
+// ─── Time range filter ─────────────────────────────────────────────────────────
+const TIME_RANGES = [
+  { label: "1 Jam",   value: "1h",  ms: 1 * 60 * 60 * 1000 },
+  { label: "6 Jam",   value: "6h",  ms: 6 * 60 * 60 * 1000 },
+  { label: "1 Hari",  value: "1d",  ms: 24 * 60 * 60 * 1000 },
+  { label: "3 Hari",  value: "3d",  ms: 3 * 24 * 60 * 60 * 1000 },
+  { label: "1 Minggu",value: "1w",  ms: 7 * 24 * 60 * 60 * 1000 },
+  { label: "1 Bulan", value: "1mo", ms: 30 * 24 * 60 * 60 * 1000 },
+  { label: "Semua",   value: "all", ms: 0 },
+] as const;
+
+const selectedTimeRange = ref<string>("all");
+
 // Unique applications from history for quick filter
 const uniqueApps = computed(() => {
   const apps = new Set<string>();
@@ -28,13 +41,25 @@ const uniqueApps = computed(() => {
   return Array.from(apps).sort();
 });
 
+// Apply time range → app filter → search query
 const filteredHistory = computed(() => {
+  const now = Date.now();
+  const range = TIME_RANGES.find((r) => r.value === selectedTimeRange.value);
+  const cutoff = range && range.ms > 0 ? now - range.ms : 0;
+
   let list = props.history;
 
+  // 1. Time range filter
+  if (cutoff > 0) {
+    list = list.filter((h) => h.timestamp >= cutoff);
+  }
+
+  // 2. App filter
   if (selectedAppFilter.value !== "ALL") {
     list = list.filter((h) => h.process_name === selectedAppFilter.value);
   }
 
+  // 3. Search query
   if (!historySearch.value.trim()) return list;
   const q = historySearch.value.toLowerCase();
   return list.filter(
@@ -46,10 +71,10 @@ const filteredHistory = computed(() => {
   );
 });
 
-// Calculate Top Domains from History along with the Applications that accessed them
+// Calculate Top Domains from **filtered** history (respects time range + app filter)
 const topDomains = computed(() => {
   const counts: Record<string, { count: number; bytes: number; apps: Set<string> }> = {};
-  props.history.forEach((h) => {
+  filteredHistory.value.forEach((h) => {
     const key = h.hostname || h.remote_address;
     if (!counts[key]) {
       counts[key] = { count: 0, bytes: 0, apps: new Set<string>() };
@@ -91,6 +116,34 @@ function copyToClipboard(text: string) {
 
 <template>
   <div class="flex flex-col gap-4">
+
+    <!-- Time Range Filter Bar -->
+    <div class="flex items-center gap-2 flex-wrap">
+      <div class="flex items-center gap-1.5 text-xs text-zinc-400 mr-1">
+        <CalendarDays class="w-3.5 h-3.5 text-cyan-400" />
+        <span class="font-medium">Rentang:</span>
+      </div>
+      <button
+        v-for="range in TIME_RANGES"
+        :key="range.value"
+        @click="selectedTimeRange = range.value"
+        :class="[
+          'px-3 py-1 rounded-lg text-xs font-medium border transition-all cursor-pointer',
+          selectedTimeRange === range.value
+            ? 'bg-cyan-600 border-cyan-600 text-white shadow-md shadow-cyan-500/20'
+            : 'bg-zinc-900/60 border-zinc-800 text-zinc-400 hover:bg-zinc-800 hover:text-white'
+        ]"
+      >
+        {{ range.label }}
+      </button>
+
+      <!-- Record count badge -->
+      <span class="ml-auto text-xs text-zinc-500 font-mono">
+        <span class="text-cyan-400 font-bold">{{ filteredHistory.length }}</span>
+        / {{ history.length }} record
+      </span>
+    </div>
+
     <!-- Top Destination Insights -->
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
       <Card class="p-4 border-zinc-800 md:col-span-2">
@@ -134,7 +187,7 @@ function copyToClipboard(text: string) {
           </div>
 
           <div v-if="topDomains.length === 0" class="text-zinc-500 text-xs py-4 text-center">
-            No history collected yet. Start using the network to populate records.
+            Tidak ada data pada rentang waktu yang dipilih.
           </div>
         </div>
       </Card>
@@ -153,6 +206,10 @@ function copyToClipboard(text: string) {
             <div class="flex justify-between text-zinc-400">
               <span>Total Recorded Events:</span>
               <span class="font-mono text-zinc-200 font-semibold">{{ history.length }}</span>
+            </div>
+            <div class="flex justify-between text-zinc-400">
+              <span>Filtered Events:</span>
+              <span class="font-mono text-cyan-400 font-semibold">{{ filteredHistory.length }}</span>
             </div>
             <div class="flex justify-between text-zinc-400">
               <span>Distinct Apps Logged:</span>
@@ -269,7 +326,7 @@ function copyToClipboard(text: string) {
             </tr>
             <tr v-if="filteredHistory.length === 0">
               <td colspan="6" class="text-center py-10 text-zinc-500 font-sans">
-                No history entries found for the selected filter.
+                Tidak ada record pada rentang waktu yang dipilih.
               </td>
             </tr>
           </tbody>
@@ -278,4 +335,3 @@ function copyToClipboard(text: string) {
     </Card>
   </div>
 </template>
-

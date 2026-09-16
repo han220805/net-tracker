@@ -9,14 +9,18 @@ import {
   Wifi,
   Moon,
   Sun,
+  Settings,
 } from "lucide-vue-next";
 import NetworkStatCards from "@/components/NetworkStatCards.vue";
 import NetworkTable from "@/components/NetworkTable.vue";
 import SpeedGraph from "@/components/SpeedGraph.vue";
 import HistoryView from "@/components/HistoryView.vue";
 import WindowControls from "@/components/WindowControls.vue";
+import SettingsModal from "@/components/SettingsModal.vue";
 import Button from "@/components/ui/Button.vue";
 import type { NetworkConnection, NetworkSummary, HistoryRecord } from "@/types/network";
+
+const showSettings = ref(false);
 
 const activeTab = ref<"live" | "history">("live");
 const isLiveActive = ref(true);
@@ -151,15 +155,21 @@ async function handleClearHistory() {
 
 const isDark = ref(true);
 
-function toggleTheme() {
-  isDark.value = !isDark.value;
-  if (isDark.value) {
+function applyTheme(dark: boolean) {
+  isDark.value = dark;
+  if (dark) {
     document.documentElement.classList.add("dark");
     document.documentElement.classList.remove("light");
   } else {
     document.documentElement.classList.add("light");
     document.documentElement.classList.remove("dark");
   }
+}
+
+function toggleTheme() {
+  const newVal = !isDark.value;
+  applyTheme(newVal);
+  localStorage.setItem("theme", newVal ? "dark" : "light");
 }
 
 const appWindow = getCurrentWindow();
@@ -179,8 +189,16 @@ function onHeaderMouseDown(e: MouseEvent) {
   });
 }
 
-onMounted(() => {
-  document.documentElement.classList.add("dark");
+onMounted(async () => {
+  // Restore theme from localStorage
+  const savedTheme = localStorage.getItem("theme");
+  applyTheme(savedTheme !== "light"); // default dark
+
+  // Run auto-cleanup based on retention_days setting
+  try {
+    await invoke("run_cleanup");
+  } catch (_) {}
+
   fetchNetworkData();
   startPolling();
 });
@@ -285,6 +303,17 @@ onUnmounted(() => {
           <Moon v-else class="w-3.5 h-3.5 text-slate-700" />
         </Button>
 
+        <!-- Settings Button -->
+        <Button
+          variant="outline"
+          size="sm"
+          @click="showSettings = true"
+          title="Pengaturan"
+          class="h-7 w-7 p-0 cursor-pointer"
+        >
+          <Settings class="w-3.5 h-3.5" />
+        </Button>
+
         <!-- Seamless Custom Window Controls (Minimize, Maximize, Close) -->
         <div :class="['border-l pl-2 ml-1 flex items-center', isDark ? 'border-zinc-800' : 'border-zinc-200']">
           <WindowControls />
@@ -315,4 +344,10 @@ onUnmounted(() => {
       </template>
     </main>
   </div>
+
+  <!-- Settings Modal -->
+  <SettingsModal
+    v-model:open="showSettings"
+    v-model:isDark="isDark"
+  />
 </template>

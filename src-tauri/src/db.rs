@@ -25,6 +25,10 @@ lazy_static! {
         let db_path = "net_tracker.db";
         let conn = Connection::open(db_path).expect("Failed to open SQLite database");
 
+        // Enable WAL mode for better concurrent write performance
+        conn.execute_batch("PRAGMA journal_mode=WAL;")
+            .expect("Failed to set WAL mode");
+
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS connection_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,7 +42,12 @@ lazy_static! {
                 total_bytes INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_history_time ON connection_history(timestamp DESC);
-            CREATE INDEX IF NOT EXISTS idx_history_host ON connection_history(hostname);"
+            CREATE INDEX IF NOT EXISTS idx_history_host ON connection_history(hostname);
+
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );"
         ).expect("Failed to initialize SQLite tables");
 
         DbManager {
@@ -46,6 +55,63 @@ lazy_static! {
         }
     };
 }
+
+// ─── Settings ────────────────────────────────────────────────────────────────
+
+pub fn get_setting(key: &str) -> Option<String> {
+    if let Ok(conn) = DB.conn.lock() {
+        let result: Result<String> = conn.query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        );
+        result.ok()
+    } else {
+        None
+    }
+}
+
+pub fn set_setting(key: &str, value: &str) -> bool {
+    if let Ok(conn) = DB.conn.lock() {
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        ).is_ok()
+    } else {
+        false
+    }
+}
+
+// ─── Auto Cleanup ─────────────────────────────────────────────────────────────
+
+/// Delete history records older than `retention_days`.
+/// If retention_days <= 0, no records are deleted (Forever).
+/// Returns the number of rows deleted.
+pub fn cleanup_old_history(retention_days: i64) -> u64 {
+    if retention_days <= 0 {
+        return 0;
+    }
+
+    let cutoff_ms = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        now - retention_days * 24 * 3600 * 1000
+    };
+
+    if let Ok(conn) = DB.conn.lock() {
+        conn.execute(
+            "DELETE FROM connection_history WHERE timestamp < ?1",
+            params![cutoff_ms],
+        ).unwrap_or(0) as u64
+    } else {
+        0
+    }
+}
+
+// ─── History CRUD ─────────────────────────────────────────────────────────────
 
 pub fn save_connection_record(
     process_name: &str,

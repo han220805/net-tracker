@@ -25,6 +25,28 @@ fn drag_window(window: tauri::WebviewWindow) {
     let _ = window.start_dragging();
 }
 
+// ─── Settings Commands ────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_setting(key: String) -> Option<String> {
+    db::get_setting(&key)
+}
+
+#[tauri::command]
+fn set_setting(key: String, value: String) -> bool {
+    db::set_setting(&key, &value)
+}
+
+/// Run auto-cleanup based on `retention_days` setting stored in DB.
+/// Returns the number of rows deleted.
+#[tauri::command]
+fn run_cleanup() -> u64 {
+    let retention_days: i64 = db::get_setting("retention_days")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30); // default: 30 days
+    db::cleanup_old_history(retention_days)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -33,7 +55,10 @@ pub fn run() {
             get_network_snapshot,
             get_history_logs,
             clear_history_logs,
-            drag_window
+            drag_window,
+            get_setting,
+            set_setting,
+            run_cleanup
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
