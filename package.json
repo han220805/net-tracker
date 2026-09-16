@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "start": "tauri dev",
-    "desktop": "tauri dev",
+    "desktop": "cmd /c \"set PATH=C:\\Users\\codehero\\.cargo\\bin;C:\\msys64\\mingw64\\bin;%PATH% && tauri dev\"",
+    "dekstop": "cmd /c \"set PATH=C:\\Users\\codehero\\.cargo\\bin;C:\\msys64\\mingw64\\bin;%PATH% && tauri dev\"",
     "desktop:build": "tauri build"
   },
   "dependencies": {

@@ -12,12 +12,14 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Net Tracker — Realtime Endpoint & Hostname Monitor",
         "width": 1200,
         "height": 780,
         "minWidth": 900,
         "minHeight": 600,
-        "center": true
+        "center": true,
+        "decorations": false
       }
     ],
     "security": {

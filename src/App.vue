@@ -1,16 +1,20 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Activity,
   History as HistoryIcon,
   RefreshCw,
   Wifi,
+  Moon,
+  Sun,
 } from "lucide-vue-next";
 import NetworkStatCards from "@/components/NetworkStatCards.vue";
 import NetworkTable from "@/components/NetworkTable.vue";
 import SpeedGraph from "@/components/SpeedGraph.vue";
 import HistoryView from "@/components/HistoryView.vue";
+import WindowControls from "@/components/WindowControls.vue";
 import Button from "@/components/ui/Button.vue";
 import type { NetworkConnection, NetworkSummary, HistoryRecord } from "@/types/network";
 
@@ -33,16 +37,19 @@ const summary = ref<NetworkSummary>({
 const connections = ref<NetworkConnection[]>([]);
 const historyRecords = ref<HistoryRecord[]>([]);
 
-// Fetch active network connections from Tauri backend
+// Fetch active network connections and history from Tauri backend
 async function fetchNetworkData() {
   try {
     const data: any = await invoke("get_network_snapshot");
     if (data) {
       connections.value = data.connections || [];
       summary.value = data.summary || summary.value;
-      if (data.history) {
-        historyRecords.value = data.history;
-      }
+    }
+
+    // Fetch persistent history from SQLite
+    const history: any = await invoke("get_history_logs");
+    if (history && Array.isArray(history)) {
+      historyRecords.value = history;
     }
   } catch (err) {
     // If running in browser or tauri backend is booting, generate realistic local sample data
@@ -135,11 +142,45 @@ function stopPolling() {
   }
 }
 
-function handleClearHistory() {
+async function handleClearHistory() {
+  try {
+    await invoke("clear_history_logs");
+  } catch (_) {}
   historyRecords.value = [];
 }
 
+const isDark = ref(true);
+
+function toggleTheme() {
+  isDark.value = !isDark.value;
+  if (isDark.value) {
+    document.documentElement.classList.add("dark");
+    document.documentElement.classList.remove("light");
+  } else {
+    document.documentElement.classList.add("light");
+    document.documentElement.classList.remove("dark");
+  }
+}
+
+const appWindow = getCurrentWindow();
+
+function onHeaderMouseDown(e: MouseEvent) {
+  // Only trigger on left mouse button and not on interactive buttons / inputs
+  if (e.button !== 0) return;
+  const target = e.target as HTMLElement | null;
+  if (target && (target.closest("button") || target.closest("input") || target.closest("a") || target.closest("select"))) {
+    return;
+  }
+
+  // Use the native Tauri window startDragging
+  appWindow.startDragging().catch(() => {
+    // If permission or webview fails, fallback to backend command
+    invoke("drag_window").catch((err) => console.error("Drag error:", err));
+  });
+}
+
 onMounted(() => {
+  document.documentElement.classList.add("dark");
   fetchNetworkData();
   startPolling();
 });
@@ -150,34 +191,40 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-[#07090e] text-zinc-100 flex flex-col selection:bg-cyan-500/30">
-    <!-- Top Navigation Header -->
-    <header class="h-14 border-b border-zinc-800/80 bg-zinc-950/70 backdrop-blur-md px-6 flex items-center justify-between sticky top-0 z-50">
-      <!-- App Brand -->
-      <div class="flex items-center gap-3">
-        <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-cyan-600 to-blue-500 flex items-center justify-center shadow-lg shadow-cyan-500/20">
-          <Wifi class="w-4 h-4 text-white" />
+  <div :class="['min-h-screen flex flex-col selection:bg-cyan-500/30 transition-colors duration-200', isDark ? 'bg-[#07090e] text-zinc-100' : 'bg-slate-50 text-zinc-800']">
+    <!-- Top Seamless Navigation Header -->
+    <header
+      data-tauri-drag-region
+      @mousedown="onHeaderMouseDown"
+      :class="['h-13 border-b px-4 flex items-center justify-between sticky top-0 z-50 select-none cursor-move backdrop-blur-md transition-colors', isDark ? 'border-zinc-800/80 bg-zinc-950/90' : 'border-zinc-200/80 bg-white/90']"
+    >
+      <!-- App Brand (Draggable) -->
+      <div data-tauri-drag-region class="flex items-center gap-3 select-none">
+        <div data-tauri-drag-region class="w-7 h-7 rounded-lg bg-gradient-to-tr from-cyan-600 to-blue-500 flex items-center justify-center shadow-md shadow-cyan-500/20">
+          <Wifi class="w-3.5 h-3.5 text-white pointer-events-none" />
         </div>
-        <div>
-          <h1 class="text-sm font-bold tracking-tight text-white flex items-center gap-2">
+        <div data-tauri-drag-region>
+          <h1 data-tauri-drag-region :class="['text-xs font-bold tracking-tight flex items-center gap-1.5', isDark ? 'text-white' : 'text-zinc-900']">
             Net Tracker
-            <span class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
+            <span class="text-[9px] font-medium px-1.5 py-0.2 rounded bg-cyan-500/10 text-cyan-500 border border-cyan-500/20 font-mono pointer-events-none">
               v1.0
             </span>
           </h1>
-          <p class="text-[11px] text-zinc-400">Endpoint Connection & Hostname Auditor</p>
         </div>
       </div>
 
+      <!-- Drag Spacer in between -->
+      <div data-tauri-drag-region class="flex-1 h-full cursor-move"></div>
+
       <!-- Center Tabs -->
-      <div class="flex items-center bg-zinc-900/80 p-1 rounded-lg border border-zinc-800/80">
+      <div class="flex items-center p-1 rounded-lg border cursor-default" :class="isDark ? 'bg-zinc-900/90 border-zinc-800/80' : 'bg-zinc-100 border-zinc-200'">
         <button
           @click="activeTab = 'live'"
           :class="[
-            'flex items-center gap-2 px-3 py-1 rounded-md text-xs font-medium transition-all',
+            'flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-all cursor-pointer',
             activeTab === 'live'
               ? 'bg-cyan-600 text-white shadow'
-              : 'text-zinc-400 hover:text-white'
+              : isDark ? 'text-zinc-400 hover:text-white' : 'text-zinc-500 hover:text-zinc-900'
           ]"
         >
           <Activity class="w-3.5 h-3.5" />
@@ -186,10 +233,10 @@ onUnmounted(() => {
         <button
           @click="activeTab = 'history'"
           :class="[
-            'flex items-center gap-2 px-3 py-1 rounded-md text-xs font-medium transition-all',
+            'flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-all cursor-pointer',
             activeTab === 'history'
               ? 'bg-cyan-600 text-white shadow'
-              : 'text-zinc-400 hover:text-white'
+              : isDark ? 'text-zinc-400 hover:text-white' : 'text-zinc-500 hover:text-zinc-900'
           ]"
         >
           <HistoryIcon class="w-3.5 h-3.5" />
@@ -197,8 +244,12 @@ onUnmounted(() => {
         </button>
       </div>
 
-      <!-- Controls -->
-      <div class="flex items-center gap-3">
+      <!-- Drag Spacer in between -->
+      <div data-tauri-drag-region class="flex-1 h-full cursor-move"></div>
+
+      <!-- Controls & Custom Window Buttons -->
+      <div class="flex items-center gap-2 cursor-default">
+        <!-- Live Status Button -->
         <button
           @click="togglePolling"
           :class="[
@@ -214,12 +265,30 @@ onUnmounted(() => {
               isLiveActive ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
             ]"
           ></span>
-          {{ isLiveActive ? 'Live Polling 1s' : 'Paused' }}
+          {{ isLiveActive ? 'Live 1s' : 'Paused' }}
         </button>
 
-        <Button variant="outline" size="sm" @click="fetchNetworkData" title="Refresh snapshot">
-          <RefreshCw class="w-3.5 h-3.5" />
+        <!-- Refresh Button -->
+        <Button variant="outline" size="sm" @click="fetchNetworkData" title="Refresh snapshot" class="h-7 w-7 p-0 cursor-pointer">
+          <RefreshCw class="w-3 h-3" />
         </Button>
+
+        <!-- Dark / Light Mode Toggle Button -->
+        <Button
+          variant="outline"
+          size="sm"
+          @click="toggleTheme"
+          :title="isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'"
+          class="h-7 w-7 p-0 cursor-pointer"
+        >
+          <Sun v-if="isDark" class="w-3.5 h-3.5 text-amber-400" />
+          <Moon v-else class="w-3.5 h-3.5 text-slate-700" />
+        </Button>
+
+        <!-- Seamless Custom Window Controls (Minimize, Maximize, Close) -->
+        <div :class="['border-l pl-2 ml-1 flex items-center', isDark ? 'border-zinc-800' : 'border-zinc-200']">
+          <WindowControls />
+        </div>
       </div>
     </header>
 

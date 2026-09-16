@@ -10,6 +10,9 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
     MIB_IF_TABLE2, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
 };
 use windows_sys::Win32::Networking::WinSock::AF_INET;
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
 use windows_sys::Win32::System::ProcessStatus::K32GetProcessImageFileNameW;
 use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -22,9 +25,18 @@ struct TrafficState {
     last_timestamp: std::time::Instant,
 }
 
+#[derive(Debug, Clone, Default)]
+struct SocketTraffic {
+    bytes_in: u64,
+    bytes_out: u64,
+    speed_in: u64,
+    speed_out: u64,
+}
+
 lazy_static! {
     static ref DNS_CACHE: RwLock<HashMap<String, String>> = RwLock::new(HashMap::new());
     static ref PROCESS_CACHE: RwLock<HashMap<u32, String>> = RwLock::new(HashMap::new());
+    static ref SOCKET_TRAFFIC: RwLock<HashMap<String, SocketTraffic>> = RwLock::new(HashMap::new());
     static ref TRAFFIC_STATE: RwLock<TrafficState> = RwLock::new(TrafficState {
         last_in_bytes: 0,
         last_out_bytes: 0,
@@ -96,14 +108,15 @@ fn resolve_process_name(pid: u32) -> String {
         return "System".to_string();
     }
 
-    // Check cache
+    // 1. Check cache first
     if let Ok(cache) = PROCESS_CACHE.read() {
         if let Some(name) = cache.get(&pid) {
             return name.clone();
         }
     }
 
-    let mut name = format!("PID:{}", pid);
+    // 2. Try OpenProcess + K32GetProcessImageFileNameW
+    let mut resolved_name: Option<String> = None;
     unsafe {
         let handle: HANDLE = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
@@ -112,47 +125,85 @@ fn resolve_process_name(pid: u32) -> String {
             if len > 0 {
                 let path = String::from_utf16_lossy(&buffer[..len as usize]);
                 if let Some(file_name) = path.split('\\').last() {
-                    name = file_name.to_string();
+                    resolved_name = Some(file_name.to_string());
                 }
             }
             CloseHandle(handle);
         }
     }
 
-    // Update cache
-    if let Ok(mut cache) = PROCESS_CACHE.write() {
-        cache.insert(pid, name.clone());
+    // 3. Fallback to CreateToolhelp32Snapshot to resolve any protected / system apps
+    if resolved_name.is_none() {
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if !snap.is_null() && snap != INVALID_HANDLE_VALUE {
+                let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+                entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+                if Process32FirstW(snap, &mut entry) != 0 {
+                    loop {
+                        let proc_name = {
+                            let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+                            String::from_utf16_lossy(&entry.szExeFile[..len])
+                        };
+
+                        if entry.th32ProcessID == pid {
+                            resolved_name = Some(proc_name.clone());
+                        }
+
+                        // Populate cache with all processes seen
+                        if let Ok(mut cache) = PROCESS_CACHE.write() {
+                            cache.insert(entry.th32ProcessID, proc_name);
+                        }
+
+                        if Process32NextW(snap, &mut entry) == 0 {
+                            break;
+                        }
+                    }
+                }
+                CloseHandle(snap);
+            }
+        }
     }
 
-    name
+    let final_name = resolved_name.unwrap_or_else(|| format!("PID:{}", pid));
+    if let Ok(mut cache) = PROCESS_CACHE.write() {
+        cache.insert(pid, final_name.clone());
+    }
+
+    final_name
 }
 
 fn resolve_hostname(ip_str: &str) -> String {
-    if ip_str == "0.0.0.0" || ip_str == "127.0.0.1" {
+    if ip_str.is_empty() || ip_str == "0.0.0.0" || ip_str == "127.0.0.1" || ip_str == "*" {
         return "localhost".to_string();
     }
 
-    // Check cache
+    // Check cache first (fast path)
     if let Ok(cache) = DNS_CACHE.read() {
         if let Some(host) = cache.get(ip_str) {
             return host.clone();
         }
     }
 
-    let ip_parsed: Result<IpAddr, _> = ip_str.parse();
-    let hostname = match ip_parsed {
-        Ok(ip) => match dns_lookup::lookup_addr(&ip) {
-            Ok(h) => h,
-            Err(_) => ip_str.to_string(),
-        },
-        Err(_) => ip_str.to_string(),
-    };
-
+    // Immediately insert IP to cache so we don't spawn duplicate threads for the same IP
     if let Ok(mut cache) = DNS_CACHE.write() {
-        cache.insert(ip_str.to_string(), hostname.clone());
+        cache.insert(ip_str.to_string(), ip_str.to_string());
     }
 
-    hostname
+    // Resolve in background thread without blocking the caller
+    let ip_owned = ip_str.to_string();
+    std::thread::spawn(move || {
+        if let Ok(ip) = ip_owned.parse::<IpAddr>() {
+            if let Ok(resolved) = dns_lookup::lookup_addr(&ip) {
+                if let Ok(mut cache) = DNS_CACHE.write() {
+                    cache.insert(ip_owned, resolved);
+                }
+            }
+        }
+    });
+
+    ip_str.to_string()
 }
 
 fn calculate_traffic_stats() -> (u64, u64, u64, u64) {
@@ -337,7 +388,48 @@ pub fn get_live_connections() -> NetworkSnapshot {
         }
     }
 
-    // Calculate Summary
+    // Distribute live throughput & maintain cumulative bytes per connection
+    let active_indices: Vec<usize> = connections
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.state == "ESTABLISHED")
+        .map(|(i, _)| i)
+        .collect();
+
+    let num_active = active_indices.len().max(1) as u64;
+    let share_dl = dl_speed / num_active;
+    let share_ul = ul_speed / num_active;
+
+    if let Ok(mut traffic_map) = SOCKET_TRAFFIC.write() {
+        for conn in &mut connections {
+            let entry = traffic_map.entry(conn.id.clone()).or_insert_with(SocketTraffic::default);
+            if conn.state == "ESTABLISHED" {
+                entry.speed_in = share_dl;
+                entry.speed_out = share_ul;
+                entry.bytes_in += share_dl;
+                entry.bytes_out += share_ul;
+
+                // Automatically save to SQLite database
+                crate::db::save_connection_record(
+                    &conn.process_name,
+                    &conn.remote_address,
+                    &conn.hostname,
+                    conn.remote_port,
+                    &conn.protocol,
+                    1,
+                    share_dl + share_ul,
+                );
+            } else {
+                entry.speed_in = 0;
+                entry.speed_out = 0;
+            }
+
+            conn.download_speed = entry.speed_in;
+            conn.upload_speed = entry.speed_out;
+            conn.bytes_received = entry.bytes_in;
+            conn.bytes_sent = entry.bytes_out;
+        }
+    }
     let total_active = connections.iter().filter(|c| c.state == "ESTABLISHED").count();
     let total_listen = connections.iter().filter(|c| c.state == "LISTEN").count();
     let mut unique_procs = std::collections::HashSet::new();
