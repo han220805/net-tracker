@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: bun install
+
+      - name: Build Tauri app
+        run: bun run desktop:build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Net Tracker ${{ github.ref_name }}"
+          body: |
+            ## Net Tracker ${{ github.ref_name }}
+            > *See every packet. Know every app.*
+
+            ### Download
+            | Platform | File | Notes |
+            |---|---|---|
+            | Windows (Installer) | `net-tracker_*_x64-setup.exe` | **Recommended** — includes WebView2 |
+            | Windows (MSI) | `net-tracker_*_x64_en-US.msi` | Enterprise/silent install |
+
+            ### Cara Install
+            1. Download file `..._setup.exe`
+            2. Jalankan dan ikuti proses instalasi
+            3. Shortcut akan muncul di Desktop & Start Menu
+
+            ### Requirements
+            - Windows 10/11 x64
+            - WebView2 Runtime (sudah di-bundle dalam installer)
+          draft: false
+          prerelease: false
+          files: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
