@@ -16,6 +16,14 @@ pub struct HistoryRecord {
     pub total_bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockedIpRecord {
+    pub ip: String,
+    pub hostname: String,
+    pub process_name: String,
+    pub blocked_at: i64,
+}
+
 struct DbManager {
     conn: Mutex<Connection>,
 }
@@ -47,6 +55,13 @@ lazy_static! {
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS blocked_ips (
+                ip TEXT PRIMARY KEY,
+                hostname TEXT NOT NULL,
+                process_name TEXT NOT NULL,
+                blocked_at INTEGER NOT NULL
             );"
         ).expect("Failed to initialize SQLite tables");
 
@@ -214,4 +229,57 @@ pub fn delete_all_history() -> Result<()> {
         conn.execute("DELETE FROM connection_history", [])?;
     }
     Ok(())
+}
+
+// ─── Blocked IPs CRUD ─────────────────────────────────────────────────────────
+
+pub fn add_blocked_ip(ip: &str, hostname: &str, process_name: &str) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+
+    if let Ok(conn) = DB.conn.lock() {
+        conn.execute(
+            "INSERT INTO blocked_ips (ip, hostname, process_name, blocked_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(ip) DO UPDATE SET hostname = excluded.hostname, process_name = excluded.process_name, blocked_at = excluded.blocked_at",
+            params![ip, hostname, process_name, now],
+        ).is_ok()
+    } else {
+        false
+    }
+}
+
+pub fn remove_blocked_ip(ip: &str) -> bool {
+    if let Ok(conn) = DB.conn.lock() {
+        conn.execute("DELETE FROM blocked_ips WHERE ip = ?1", params![ip]).is_ok()
+    } else {
+        false
+    }
+}
+
+pub fn fetch_blocked_ips() -> Vec<BlockedIpRecord> {
+    let mut list = Vec::new();
+    if let Ok(conn) = DB.conn.lock() {
+        let mut stmt = match conn.prepare("SELECT ip, hostname, process_name, blocked_at FROM blocked_ips ORDER BY blocked_at DESC") {
+            Ok(s) => s,
+            Err(_) => return list,
+        };
+
+        let rows = stmt.query_map([], |row| {
+            Ok(BlockedIpRecord {
+                ip: row.get(0)?,
+                hostname: row.get(1)?,
+                process_name: row.get(2)?,
+                blocked_at: row.get(3)?,
+            })
+        });
+
+        if let Ok(rows) = rows {
+            for r in rows.flatten() {
+                list.push(r);
+            }
+        }
+    }
+    list
 }

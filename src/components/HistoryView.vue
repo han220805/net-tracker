@@ -1,23 +1,95 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
-import { Search, Trash2, Globe, Clock, AppWindow, Check, Copy, CalendarDays } from "lucide-vue-next";
+import { Search, Trash2, Globe, Clock, AppWindow, Check, Copy, CalendarDays, ShieldAlert } from "lucide-vue-next";
 import Card from "@/components/ui/Card.vue";
 import Input from "@/components/ui/Input.vue";
 import Button from "@/components/ui/Button.vue";
+import ConfirmModal from "@/components/ui/ConfirmModal.vue";
 import { formatBytes } from "@/lib/utils";
-import type { HistoryRecord } from "@/types/network";
+import type { HistoryRecord, BlockedIpRecord } from "@/types/network";
 
 const props = defineProps<{
   history: HistoryRecord[];
+  blockedIps?: BlockedIpRecord[];
 }>();
 
 const emit = defineEmits<{
   (e: "clear-history"): void;
+  (e: "block-ip", payload: { ip: string; hostname?: string; processName?: string }): void;
+  (e: "unblock-ip", payload: { ip: string }): void;
 }>();
 
 const historySearch = ref("");
 const selectedAppFilter = ref<string>("ALL");
 const copiedIp = ref<string | null>(null);
+
+function isIpBlocked(ip: string): boolean {
+  if (!props.blockedIps || !ip) return false;
+  return props.blockedIps.some((b) => b.ip === ip);
+}
+
+// Confirmation Dialog State
+const confirmModal = ref<{
+  open: boolean;
+  type: "block" | "unblock";
+  title: string;
+  description: string;
+  targetName: string;
+  targetDetail?: string;
+  actionType: "warning" | "success";
+  confirmText: string;
+  payload: any;
+}>({
+  open: false,
+  type: "block",
+  title: "",
+  description: "",
+  targetName: "",
+  targetDetail: "",
+  actionType: "warning",
+  confirmText: "",
+  payload: null,
+});
+
+function promptBlockIp(ip: string, hostname?: string, processName?: string) {
+  confirmModal.value = {
+    open: true,
+    type: "block",
+    title: "Blokir Alamat IP di Firewall",
+    description: "Apakah Anda yakin ingin memblokir IP ini? Windows Defender Firewall akan memutus semua koneksi masuk (inbound) dan keluar (outbound) ke alamat ini.",
+    targetName: ip,
+    targetDetail: hostname && hostname !== ip ? `Domain: ${hostname} (${processName || 'App'})` : `Aplikasi: ${processName || 'Unknown'}`,
+    actionType: "warning",
+    confirmText: "Blokir IP Ini",
+    payload: { ip, hostname, processName },
+  };
+}
+
+function promptUnblockIp(ip: string, hostname?: string) {
+  confirmModal.value = {
+    open: true,
+    type: "unblock",
+    title: "Buka Blokir IP (Release)",
+    description: "Apakah Anda ingin membuka kembali blokir firewall untuk IP ini? Komputer Anda akan dapat terhubung kembali ke alamat tersebut.",
+    targetName: ip,
+    targetDetail: hostname ? `Domain: ${hostname}` : undefined,
+    actionType: "success",
+    confirmText: "Buka Blokir",
+    payload: { ip },
+  };
+}
+
+function executeConfirmedAction() {
+  const m = confirmModal.value;
+  if (!m.open) return;
+  m.open = false;
+
+  if (m.type === "block") {
+    emit("block-ip", m.payload);
+  } else if (m.type === "unblock") {
+    emit("unblock-ip", m.payload);
+  }
+}
 
 // ─── Time range filter ─────────────────────────────────────────────────────────
 const TIME_RANGES = [
@@ -267,6 +339,7 @@ function copyToClipboard(text: string) {
               <th class="py-2.5 px-3">Destination Hostname & IP</th>
               <th class="py-2.5 px-3">Port</th>
               <th class="py-2.5 px-3 text-right">Data Exchanged</th>
+              <th class="py-2.5 px-3 text-right">Action</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-zinc-800/60 font-mono">
@@ -323,15 +396,51 @@ function copyToClipboard(text: string) {
               <td class="py-2.5 px-3 text-right whitespace-nowrap font-semibold text-cyan-400">
                 {{ formatBytes(record.total_bytes) }}
               </td>
+
+              <!-- Action Column -->
+              <td class="py-2.5 px-3 text-right whitespace-nowrap">
+                <template v-if="record.remote_address && record.remote_address !== '*' && record.remote_address !== '0.0.0.0' && !record.remote_address.startsWith('127.')">
+                  <button
+                    v-if="isIpBlocked(record.remote_address)"
+                    @click.stop="promptUnblockIp(record.remote_address, record.hostname)"
+                    class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-950 text-rose-300 border border-rose-800/80 hover:bg-rose-900 transition-colors inline-flex items-center gap-1 cursor-pointer"
+                    title="IP ini sedang DIBLOKIR. Klik untuk buka blokir (Release)"
+                  >
+                    <ShieldAlert class="w-3 h-3 text-rose-400" />
+                    <span>BLOCKED</span>
+                  </button>
+                  <button
+                    v-else
+                    @click.stop="promptBlockIp(record.remote_address, record.hostname, record.process_name)"
+                    class="p-1 rounded text-zinc-400 hover:text-amber-400 hover:bg-zinc-800 transition-colors cursor-pointer inline-flex items-center"
+                    title="Blokir IP ini di Windows Defender Firewall"
+                  >
+                    <ShieldAlert class="w-3.5 h-3.5" />
+                  </button>
+                </template>
+              </td>
             </tr>
             <tr v-if="filteredHistory.length === 0">
-              <td colspan="6" class="text-center py-10 text-zinc-500 font-sans">
+              <td colspan="7" class="text-center py-10 text-zinc-500 font-sans">
                 Tidak ada record pada rentang waktu yang dipilih.
               </td>
             </tr>
           </tbody>
         </table>
       </div>
+
+      <!-- Confirmation Modal -->
+      <ConfirmModal
+        :open="confirmModal.open"
+        :title="confirmModal.title"
+        :description="confirmModal.description"
+        :target-name="confirmModal.targetName"
+        :target-detail="confirmModal.targetDetail"
+        :action-type="confirmModal.actionType"
+        :confirm-text="confirmModal.confirmText"
+        @confirm="executeConfirmedAction"
+        @close="confirmModal.open = false"
+      />
     </Card>
   </div>
 </template>

@@ -1,7 +1,7 @@
 {
   "name": "net-tracker",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,9 +14,10 @@
     "desktop:build": "cmd /c \"set PATH=C:\\Users\\codehero\\.cargo\\bin;C:\\msys64\\mingw64\\bin;%PATH% && tauri build\""
   },
   "dependencies": {
-    "vue": "^3.5.13",
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-updater": "^2.11.0",
+    "vue": "^3.5.13"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

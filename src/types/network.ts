@@ -56,3 +56,11 @@ export interface HistoryRecord {
   duration_seconds: number;
   total_bytes: number;
 }
+
+export interface BlockedIpRecord {
+  ip: string;
+  hostname: string;
+  process_name: string;
+  blocked_at: number;
+}
+

@@ -10,6 +10,9 @@ import {
   Moon,
   Sun,
   Settings,
+  CheckCircle2,
+  AlertCircle,
+  Info,
 } from "lucide-vue-next";
 import NetworkStatCards from "@/components/NetworkStatCards.vue";
 import NetworkTable from "@/components/NetworkTable.vue";
@@ -17,8 +20,15 @@ import SpeedGraph from "@/components/SpeedGraph.vue";
 import HistoryView from "@/components/HistoryView.vue";
 import WindowControls from "@/components/WindowControls.vue";
 import SettingsModal from "@/components/SettingsModal.vue";
+import ForceUpdateModal from "@/components/ui/ForceUpdateModal.vue";
 import Button from "@/components/ui/Button.vue";
-import type { NetworkConnection, NetworkSummary, HistoryRecord } from "@/types/network";
+import type {
+  NetworkConnection,
+  NetworkSummary,
+  HistoryRecord,
+  BlockedIpRecord,
+} from "@/types/network";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 
 const showSettings = ref(false);
 
@@ -40,8 +50,29 @@ const summary = ref<NetworkSummary>({
 
 const connections = ref<NetworkConnection[]>([]);
 const historyRecords = ref<HistoryRecord[]>([]);
+const blockedIps = ref<BlockedIpRecord[]>([]);
 
-// Fetch active network connections and history from Tauri backend
+// ─── Toast Notifications ───────────────────────────────────────────────────────
+const toast = ref<{
+  message: string;
+  type: "success" | "error" | "info";
+  show: boolean;
+}>({
+  message: "",
+  type: "success",
+  show: false,
+});
+let toastTimer: any = null;
+
+function showToast(message: string, type: "success" | "error" | "info" = "success") {
+  if (toastTimer) clearTimeout(toastTimer);
+  toast.value = { message, type, show: true };
+  toastTimer = setTimeout(() => {
+    toast.value.show = false;
+  }, 3500);
+}
+
+// ─── Fetch Active Data & SQLite Records ────────────────────────────────────────
 async function fetchNetworkData() {
   try {
     const data: any = await invoke("get_network_snapshot");
@@ -58,6 +89,140 @@ async function fetchNetworkData() {
   } catch (err) {
     // If running in browser or tauri backend is booting, generate realistic local sample data
     fallbackLocalData();
+  }
+}
+
+async function fetchBlockedIps() {
+  try {
+    const list: any = await invoke("get_blocked_ips");
+    if (Array.isArray(list)) {
+      blockedIps.value = list;
+    }
+  } catch (_) {}
+}
+
+// ─── Defense Handlers: Kill Process & Block / Release IP ───────────────────────
+async function handleKillProcess({ pid, name }: { pid: number; name: string }) {
+  try {
+    await invoke("kill_process", { pid });
+    showToast(`Proses ${name} (PID ${pid}) berhasil dihentikan!`, "success");
+    await fetchNetworkData();
+  } catch (err: any) {
+    showToast(`Gagal mematikan proses: ${err}`, "error");
+  }
+}
+
+async function handleBlockIp({
+  ip,
+  hostname,
+  processName,
+}: {
+  ip: string;
+  hostname?: string;
+  processName?: string;
+}) {
+  try {
+    await invoke("block_ip", { ip, hostname, processName });
+    showToast(`IP ${ip} berhasil diblokir di Windows Firewall!`, "success");
+    await fetchBlockedIps();
+  } catch (err: any) {
+    showToast(`Gagal memblokir IP: ${err}`, "error");
+  }
+}
+
+async function handleUnblockIp(arg: { ip: string } | string) {
+  const ip = typeof arg === "string" ? arg : arg.ip;
+  try {
+    await invoke("unblock_ip", { ip });
+    showToast(`Blokir firewall untuk IP ${ip} telah dibuka (Released)!`, "info");
+    await fetchBlockedIps();
+  } catch (err: any) {
+    showToast(`Gagal membuka blokir IP: ${err}`, "error");
+  }
+}
+
+// ─── Auto-Updater (Forced Update System) ───────────────────────────────────────
+const updateState = ref<{
+  open: boolean;
+  currentVersion: string;
+  newVersion: string;
+  releaseNotes: string;
+  isDownloading: boolean;
+  progressPercent: number;
+  downloadedBytes: number;
+  totalBytes: number;
+  errorMessage: string | null;
+  updateObj: Update | null;
+}>({
+  open: false,
+  currentVersion: "0.2.0",
+  newVersion: "",
+  releaseNotes: "",
+  isDownloading: false,
+  progressPercent: 0,
+  downloadedBytes: 0,
+  totalBytes: 0,
+  errorMessage: null,
+  updateObj: null,
+});
+
+async function checkForUpdates(manual = false) {
+  try {
+    const update = await check();
+    if (update) {
+      updateState.value = {
+        open: true,
+        currentVersion: update.currentVersion || "0.2.0",
+        newVersion: update.version,
+        releaseNotes: update.body || "",
+        isDownloading: false,
+        progressPercent: 0,
+        downloadedBytes: 0,
+        totalBytes: 0,
+        errorMessage: null,
+        updateObj: update,
+      };
+    } else if (manual) {
+      showToast("Aplikasi sudah menggunakan versi terbaru (v0.2.0).", "info");
+    }
+  } catch (err: any) {
+    if (manual) {
+      showToast(`Gagal memeriksa pembaruan: ${err}`, "error");
+    }
+  }
+}
+
+async function startUpdate() {
+  const update = updateState.value.updateObj;
+  if (!update) return;
+
+  updateState.value.isDownloading = true;
+  updateState.value.errorMessage = null;
+
+  try {
+    let downloaded = 0;
+    let total = 0;
+
+    await update.downloadAndInstall((event) => {
+      if (event.event === "Started") {
+        total = event.data.contentLength || 0;
+        updateState.value.totalBytes = total;
+      } else if (event.event === "Progress") {
+        downloaded += event.data.chunkLength;
+        updateState.value.downloadedBytes = downloaded;
+        if (total > 0) {
+          updateState.value.progressPercent = Math.min(
+            100,
+            Math.round((downloaded / total) * 100)
+          );
+        }
+      } else if (event.event === "Finished") {
+        updateState.value.progressPercent = 100;
+      }
+    });
+  } catch (err: any) {
+    updateState.value.isDownloading = false;
+    updateState.value.errorMessage = String(err);
   }
 }
 
@@ -175,32 +340,31 @@ function toggleTheme() {
 const appWindow = getCurrentWindow();
 
 function onHeaderMouseDown(e: MouseEvent) {
-  // Only trigger on left mouse button and not on interactive buttons / inputs
   if (e.button !== 0) return;
   const target = e.target as HTMLElement | null;
   if (target && (target.closest("button") || target.closest("input") || target.closest("a") || target.closest("select"))) {
     return;
   }
 
-  // Use the native Tauri window startDragging
   appWindow.startDragging().catch(() => {
-    // If permission or webview fails, fallback to backend command
     invoke("drag_window").catch((err) => console.error("Drag error:", err));
   });
 }
 
 onMounted(async () => {
-  // Restore theme from localStorage
   const savedTheme = localStorage.getItem("theme");
-  applyTheme(savedTheme !== "light"); // default dark
+  applyTheme(savedTheme !== "light");
 
-  // Run auto-cleanup based on retention_days setting
   try {
     await invoke("run_cleanup");
   } catch (_) {}
 
+  await fetchBlockedIps();
   fetchNetworkData();
   startPolling();
+
+  // Check for auto update from GitHub
+  checkForUpdates(false);
 });
 
 onUnmounted(() => {
@@ -218,31 +382,28 @@ onUnmounted(() => {
     >
       <!-- App Brand (Draggable) -->
       <div data-tauri-drag-region class="flex items-center gap-3 select-none">
-        <div data-tauri-drag-region class="w-7 h-7 rounded-lg bg-gradient-to-tr from-cyan-600 to-blue-500 flex items-center justify-center shadow-md shadow-cyan-500/20">
-          <Wifi class="w-3.5 h-3.5 text-white pointer-events-none" />
+        <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-cyan-600 to-blue-500 flex items-center justify-center text-white shadow-md shadow-cyan-500/20">
+          <Wifi class="w-4 h-4" />
         </div>
-        <div data-tauri-drag-region>
-          <h1 data-tauri-drag-region :class="['text-xs font-bold tracking-tight flex items-center gap-1.5', isDark ? 'text-white' : 'text-zinc-900']">
+        <div>
+          <h1 class="text-sm font-bold tracking-wider uppercase font-mono text-zinc-100 flex items-center gap-2">
             Net Tracker
-            <span class="text-[9px] font-medium px-1.5 py-0.2 rounded bg-cyan-500/10 text-cyan-500 border border-cyan-500/20 font-mono pointer-events-none">
-              v1.0
+            <span class="text-[10px] px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-400 border border-cyan-800 font-sans normal-case">
+              v0.2.0
             </span>
           </h1>
         </div>
       </div>
 
-      <!-- Drag Spacer in between -->
-      <div data-tauri-drag-region class="flex-1 h-full cursor-move"></div>
-
       <!-- Center Tabs -->
-      <div class="flex items-center p-1 rounded-lg border cursor-default" :class="isDark ? 'bg-zinc-900/90 border-zinc-800/80' : 'bg-zinc-100 border-zinc-200'">
+      <nav data-tauri-drag-region class="flex items-center gap-1 bg-zinc-900/60 p-1 rounded-xl border border-zinc-800/80 text-xs">
         <button
           @click="activeTab = 'live'"
           :class="[
-            'flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-all cursor-pointer',
+            'flex items-center gap-2 px-3 py-1 rounded-lg transition-all font-medium cursor-pointer',
             activeTab === 'live'
-              ? 'bg-cyan-600 text-white shadow'
-              : isDark ? 'text-zinc-400 hover:text-white' : 'text-zinc-500 hover:text-zinc-900'
+              ? 'bg-zinc-800 text-cyan-400 shadow-sm'
+              : 'text-zinc-400 hover:text-white'
           ]"
         >
           <Activity class="w-3.5 h-3.5" />
@@ -251,30 +412,27 @@ onUnmounted(() => {
         <button
           @click="activeTab = 'history'"
           :class="[
-            'flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-all cursor-pointer',
+            'flex items-center gap-2 px-3 py-1 rounded-lg transition-all font-medium cursor-pointer',
             activeTab === 'history'
-              ? 'bg-cyan-600 text-white shadow'
-              : isDark ? 'text-zinc-400 hover:text-white' : 'text-zinc-500 hover:text-zinc-900'
+              ? 'bg-zinc-800 text-cyan-400 shadow-sm'
+              : 'text-zinc-400 hover:text-white'
           ]"
         >
           <HistoryIcon class="w-3.5 h-3.5" />
           History Log
         </button>
-      </div>
+      </nav>
 
-      <!-- Drag Spacer in between -->
-      <div data-tauri-drag-region class="flex-1 h-full cursor-move"></div>
-
-      <!-- Controls & Custom Window Buttons -->
-      <div class="flex items-center gap-2 cursor-default">
-        <!-- Live Status Button -->
+      <!-- Right Action Controls -->
+      <div class="flex items-center gap-2">
+        <!-- Live status pill -->
         <button
           @click="togglePolling"
           :class="[
-            'flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border transition-all cursor-pointer',
+            'text-xs font-mono px-2.5 py-1 rounded-full border transition-all flex items-center gap-1.5 cursor-pointer',
             isLiveActive
-              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
-              : 'border-amber-500/30 bg-amber-500/10 text-amber-400'
+              ? 'bg-emerald-950/40 text-emerald-400 border-emerald-800/50'
+              : 'bg-amber-950/40 text-amber-400 border-amber-800/50'
           ]"
         >
           <span
@@ -308,10 +466,14 @@ onUnmounted(() => {
           variant="outline"
           size="sm"
           @click="showSettings = true"
-          title="Pengaturan"
-          class="h-7 w-7 p-0 cursor-pointer"
+          title="Pengaturan & Firewall"
+          class="h-7 w-7 p-0 cursor-pointer relative"
         >
           <Settings class="w-3.5 h-3.5" />
+          <span
+            v-if="blockedIps.length > 0"
+            class="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-rose-500"
+          ></span>
         </Button>
 
         <!-- Seamless Custom Window Controls (Minimize, Maximize, Close) -->
@@ -334,20 +496,84 @@ onUnmounted(() => {
           :upload-speed="summary.total_upload_speed"
         />
 
-        <!-- Active Connections Table -->
-        <NetworkTable :connections="connections" />
+        <!-- Active Connections Table with Defense Actions -->
+        <NetworkTable
+          :connections="connections"
+          :blocked-ips="blockedIps"
+          @kill-process="handleKillProcess"
+          @block-ip="handleBlockIp"
+          @unblock-ip="handleUnblockIp"
+        />
       </template>
 
       <!-- History Audit Tab -->
       <template v-else>
-        <HistoryView :history="historyRecords" @clear-history="handleClearHistory" />
+        <HistoryView
+          :history="historyRecords"
+          :blocked-ips="blockedIps"
+          @clear-history="handleClearHistory"
+          @block-ip="handleBlockIp"
+          @unblock-ip="handleUnblockIp"
+        />
       </template>
     </main>
+
+    <!-- Toast Notification Overlay -->
+    <Transition name="toast">
+      <div
+        v-if="toast.show"
+        class="fixed bottom-6 right-6 z-[150] flex items-center gap-2.5 px-4 py-2.5 rounded-xl shadow-2xl border text-xs font-sans font-medium select-none"
+        :class="[
+          toast.type === 'success'
+            ? 'bg-zinc-900 border-emerald-500/50 text-emerald-300 shadow-emerald-950/40'
+            : toast.type === 'error'
+            ? 'bg-zinc-900 border-rose-500/50 text-rose-300 shadow-rose-950/40'
+            : 'bg-zinc-900 border-cyan-500/50 text-cyan-300 shadow-cyan-950/40'
+        ]"
+      >
+        <CheckCircle2 v-if="toast.type === 'success'" class="w-4 h-4 text-emerald-400 shrink-0" />
+        <AlertCircle v-else-if="toast.type === 'error'" class="w-4 h-4 text-rose-400 shrink-0" />
+        <Info v-else class="w-4 h-4 text-cyan-400 shrink-0" />
+        <span>{{ toast.message }}</span>
+      </div>
+    </Transition>
   </div>
 
   <!-- Settings Modal -->
   <SettingsModal
     v-model:open="showSettings"
     v-model:isDark="isDark"
+    :blocked-ips="blockedIps"
+    :current-version="updateState.currentVersion"
+    :update-available="updateState.open"
+    :new-version="updateState.newVersion"
+    @unblock-ip="handleUnblockIp"
+    @check-update="() => checkForUpdates(true)"
+  />
+
+  <!-- Force Update Modal (Graceful Blocking Update Lockout) -->
+  <ForceUpdateModal
+    :open="updateState.open"
+    :current-version="updateState.currentVersion"
+    :new-version="updateState.newVersion"
+    :release-notes="updateState.releaseNotes"
+    :is-downloading="updateState.isDownloading"
+    :progress-percent="updateState.progressPercent"
+    :downloaded-bytes="updateState.downloadedBytes"
+    :total-bytes="updateState.totalBytes"
+    :error-message="updateState.errorMessage"
+    @start-update="startUpdate"
   />
 </template>
+
+<style scoped>
+.toast-enter-active,
+.toast-leave-active {
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.toast-enter-from,
+.toast-leave-to {
+  opacity: 0;
+  transform: translateY(12px) scale(0.95);
+}
+</style>

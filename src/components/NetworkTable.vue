@@ -17,16 +17,26 @@ import {
   ArrowUp,
   HardDrive,
   Zap,
+  Skull,
+  ShieldAlert
 } from "lucide-vue-next";
 import Badge from "@/components/ui/Badge.vue";
 import Input from "@/components/ui/Input.vue";
 import Card from "@/components/ui/Card.vue";
+import ConfirmModal from "@/components/ui/ConfirmModal.vue";
 import { formatBytes, formatSpeed } from "@/lib/utils";
-import type { NetworkConnection } from "@/types/network";
+import type { NetworkConnection, BlockedIpRecord } from "@/types/network";
 
 const props = defineProps<{
   connections: NetworkConnection[];
   isLoading?: boolean;
+  blockedIps?: BlockedIpRecord[];
+}>();
+
+const emit = defineEmits<{
+  (e: "kill-process", payload: { pid: number; name: string }): void;
+  (e: "block-ip", payload: { ip: string; hostname?: string; processName?: string }): void;
+  (e: "unblock-ip", payload: { ip: string }): void;
 }>();
 
 const searchQuery = ref("");
@@ -35,6 +45,90 @@ const selectedState = ref<string>("ALL");
 const viewMode = ref<"grouped" | "flat">("grouped");
 const expandedApps = ref<Record<string, boolean>>({});
 const copiedIp = ref<string | null>(null);
+
+function isIpBlocked(ip: string): boolean {
+  if (!props.blockedIps || !ip) return false;
+  return props.blockedIps.some((b) => b.ip === ip);
+}
+
+// Confirmation Dialog State
+const confirmModal = ref<{
+  open: boolean;
+  type: "kill" | "block" | "unblock";
+  title: string;
+  description: string;
+  targetName: string;
+  targetDetail?: string;
+  actionType: "danger" | "warning" | "success";
+  confirmText: string;
+  payload: any;
+}>({
+  open: false,
+  type: "kill",
+  title: "",
+  description: "",
+  targetName: "",
+  targetDetail: "",
+  actionType: "danger",
+  confirmText: "",
+  payload: null,
+});
+
+function promptKillProcess(pid: number, name: string) {
+  confirmModal.value = {
+    open: true,
+    type: "kill",
+    title: "Hentikan Proses (Kill Process)",
+    description: "Apakah Anda yakin ingin mematikan aplikasi ini? Seluruh aktivitas dan soket jaringan yang dimiliki proses ini akan langsung diputus oleh sistem Windows.",
+    targetName: name,
+    targetDetail: `PID: ${pid}`,
+    actionType: "danger",
+    confirmText: "Hentikan Proses",
+    payload: { pid, name },
+  };
+}
+
+function promptBlockIp(ip: string, hostname?: string, processName?: string) {
+  confirmModal.value = {
+    open: true,
+    type: "block",
+    title: "Blokir Alamat IP di Firewall",
+    description: "Apakah Anda yakin ingin memblokir IP ini? Windows Defender Firewall akan memutus semua koneksi masuk (inbound) dan keluar (outbound) ke alamat ini.",
+    targetName: ip,
+    targetDetail: hostname && hostname !== ip ? `Domain: ${hostname} (${processName || 'App'})` : `Aplikasi: ${processName || 'Unknown'}`,
+    actionType: "warning",
+    confirmText: "Blokir IP Ini",
+    payload: { ip, hostname, processName },
+  };
+}
+
+function promptUnblockIp(ip: string, hostname?: string) {
+  confirmModal.value = {
+    open: true,
+    type: "unblock",
+    title: "Buka Blokir IP (Release)",
+    description: "Apakah Anda ingin membuka kembali blokir firewall untuk IP ini? Komputer Anda akan dapat terhubung kembali ke alamat tersebut.",
+    targetName: ip,
+    targetDetail: hostname ? `Domain: ${hostname}` : undefined,
+    actionType: "success",
+    confirmText: "Buka Blokir",
+    payload: { ip },
+  };
+}
+
+function executeConfirmedAction() {
+  const m = confirmModal.value;
+  if (!m.open) return;
+  m.open = false;
+
+  if (m.type === "kill") {
+    emit("kill-process", m.payload);
+  } else if (m.type === "block") {
+    emit("block-ip", m.payload);
+  } else if (m.type === "unblock") {
+    emit("unblock-ip", m.payload);
+  }
+}
 
 // Sorting state
 type SortOption = "bandwidth" | "total_data" | "connections" | "destinations" | "name";
@@ -412,6 +506,17 @@ function getStateBadgeVariant(state: string) {
                 {{ app.listenCount }} listen
               </Badge>
             </div>
+
+            <!-- Kill Process Button on App Header -->
+            <button
+              v-if="app.pids.length > 0 && app.pids[0] !== 0 && app.pids[0] !== 4"
+              @click.stop="promptKillProcess(app.pids[0], app.name)"
+              class="px-2.5 py-1 rounded-lg text-xs font-semibold bg-rose-950/50 hover:bg-rose-900/80 text-rose-400 border border-rose-800/60 flex items-center gap-1.5 transition-all cursor-pointer shadow-sm hover:text-white"
+              title="Hentikan Proses (Kill Process)"
+            >
+              <Skull class="w-3.5 h-3.5" />
+              <span>Kill</span>
+            </button>
           </div>
         </div>
 
@@ -504,15 +609,38 @@ function getStateBadgeVariant(state: string) {
 
                 <!-- Action -->
                 <td class="py-2 px-2 text-right">
-                  <button
-                    v-if="conn.remote_address && conn.remote_address !== '*'"
-                    @click.stop="copyToClipboard(conn.remote_address)"
-                    class="p-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors inline-flex items-center cursor-pointer"
-                    :title="copiedIp === conn.remote_address ? 'Copied!' : 'Copy IP'"
-                  >
-                    <Check v-if="copiedIp === conn.remote_address" class="w-3.5 h-3.5 text-emerald-400" />
-                    <Copy v-else class="w-3.5 h-3.5" />
-                  </button>
+                  <div class="flex items-center justify-end gap-1">
+                    <!-- Block / Release Button for valid external IP -->
+                    <template v-if="conn.remote_address && conn.remote_address !== '*' && conn.remote_address !== '0.0.0.0' && !conn.remote_address.startsWith('127.')">
+                      <button
+                        v-if="isIpBlocked(conn.remote_address)"
+                        @click.stop="promptUnblockIp(conn.remote_address, conn.hostname)"
+                        class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-950 text-rose-300 border border-rose-800/80 hover:bg-rose-900 transition-colors flex items-center gap-1 cursor-pointer"
+                        title="IP ini sedang DIBLOKIR di Firewall. Klik untuk buka blokir (Release)"
+                      >
+                        <ShieldAlert class="w-3 h-3 text-rose-400" />
+                        <span>BLOCKED</span>
+                      </button>
+                      <button
+                        v-else
+                        @click.stop="promptBlockIp(conn.remote_address, conn.hostname, conn.process_name)"
+                        class="p-1 rounded text-zinc-400 hover:text-amber-400 hover:bg-zinc-800 transition-colors cursor-pointer"
+                        title="Blokir IP ini di Windows Firewall"
+                      >
+                        <ShieldAlert class="w-3.5 h-3.5" />
+                      </button>
+                    </template>
+
+                    <button
+                      v-if="conn.remote_address && conn.remote_address !== '*'"
+                      @click.stop="copyToClipboard(conn.remote_address)"
+                      class="p-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors inline-flex items-center cursor-pointer"
+                      :title="copiedIp === conn.remote_address ? 'Copied!' : 'Copy IP'"
+                    >
+                      <Check v-if="copiedIp === conn.remote_address" class="w-3.5 h-3.5 text-emerald-400" />
+                      <Copy v-else class="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </td>
               </tr>
             </tbody>
@@ -580,17 +708,64 @@ function getStateBadgeVariant(state: string) {
               <Badge :variant="getStateBadgeVariant(conn.state)">{{ conn.state }}</Badge>
             </td>
             <td class="py-2.5 px-3 text-right">
-              <button
-                @click="copyToClipboard(conn.remote_address)"
-                class="p-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-800 cursor-pointer"
-              >
-                <Check v-if="copiedIp === conn.remote_address" class="w-3.5 h-3.5 text-emerald-400" />
-                <Copy v-else class="w-3.5 h-3.5" />
-              </button>
+              <div class="flex items-center justify-end gap-1.5">
+                <!-- Kill Process -->
+                <button
+                  v-if="conn.pid !== 0 && conn.pid !== 4"
+                  @click.stop="promptKillProcess(conn.pid, conn.process_name)"
+                  class="p-1 rounded text-zinc-400 hover:text-rose-400 hover:bg-rose-950/40 transition-colors cursor-pointer"
+                  title="Hentikan Proses (Kill Process)"
+                >
+                  <Skull class="w-3.5 h-3.5" />
+                </button>
+
+                <!-- Block / Release IP -->
+                <template v-if="conn.remote_address && conn.remote_address !== '*' && conn.remote_address !== '0.0.0.0' && !conn.remote_address.startsWith('127.')">
+                  <button
+                    v-if="isIpBlocked(conn.remote_address)"
+                    @click.stop="promptUnblockIp(conn.remote_address, conn.hostname)"
+                    class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-950 text-rose-300 border border-rose-800/80 hover:bg-rose-900 transition-colors flex items-center gap-1 cursor-pointer"
+                    title="Klik untuk buka blokir (Release)"
+                  >
+                    <ShieldAlert class="w-3 h-3 text-rose-400" />
+                    <span>BLOCKED</span>
+                  </button>
+                  <button
+                    v-else
+                    @click.stop="promptBlockIp(conn.remote_address, conn.hostname, conn.process_name)"
+                    class="p-1 rounded text-zinc-400 hover:text-amber-400 hover:bg-zinc-800 transition-colors cursor-pointer"
+                    title="Blokir IP di Firewall"
+                  >
+                    <ShieldAlert class="w-3.5 h-3.5" />
+                  </button>
+                </template>
+
+                <button
+                  @click="copyToClipboard(conn.remote_address)"
+                  class="p-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-800 cursor-pointer"
+                  :title="copiedIp === conn.remote_address ? 'Copied!' : 'Copy IP'"
+                >
+                  <Check v-if="copiedIp === conn.remote_address" class="w-3.5 h-3.5 text-emerald-400" />
+                  <Copy v-else class="w-3.5 h-3.5" />
+                </button>
+              </div>
             </td>
           </tr>
         </tbody>
       </table>
     </div>
+
+    <!-- Confirmation Modal -->
+    <ConfirmModal
+      :open="confirmModal.open"
+      :title="confirmModal.title"
+      :description="confirmModal.description"
+      :target-name="confirmModal.targetName"
+      :target-detail="confirmModal.targetDetail"
+      :action-type="confirmModal.actionType"
+      :confirm-text="confirmModal.confirmText"
+      @confirm="executeConfirmedAction"
+      @close="confirmModal.open = false"
+    />
   </Card>
 </template>
