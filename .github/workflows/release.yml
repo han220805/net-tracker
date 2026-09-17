@@ -42,23 +42,38 @@ jobs:
         with:
           name: "Net Tracker ${{ github.ref_name }}"
           body: |
-            ## Net Tracker ${{ github.ref_name }}
-            > *See every packet. Know every app.*
+            # 🌐 Net Tracker ${{ github.ref_name }}
+            > *Monitor lalu lintas internet komputer Anda secara realtime, transparan, dan privat.*
 
-            ### Download
-            | Platform | File | Notes |
+            ---
+
+            ### 📦 Pilihan Download
+            | File Installer | Keterangan | Rekomendasi |
             |---|---|---|
-            | Windows (Installer) | `net-tracker_*_x64-setup.exe` | **Recommended** — includes WebView2 |
-            | Windows (MSI) | `net-tracker_*_x64_en-US.msi` | Enterprise/silent install |
+            | `net-tracker_*_x64-setup.exe` | Installer wizard praktis (NSIS) | ⭐ **Sangat Disarankan** (Membuat shortcut di Desktop & Start Menu) |
+            | `net-tracker_*_x64_en-US.msi` | Windows Installer Package (MSI) | Cocok untuk instalasi silent / lingkungan korporat |
 
-            ### Cara Install
-            1. Download file `..._setup.exe`
-            2. Jalankan dan ikuti proses instalasi
-            3. Shortcut akan muncul di Desktop & Start Menu
+            ---
 
-            ### Requirements
-            - Windows 10/11 x64
-            - WebView2 Runtime (sudah di-bundle dalam installer)
+            ### 🚀 Langkah Cepat Instalasi
+            1. Unduh file `net-tracker_*_x64-setup.exe` pada daftar **Assets** di bawah.
+            2. Jalankan installer dan ikuti instruksi di layar hingga selesai.
+            3. Buka **Net Tracker** dari Desktop atau menu Start.
+
+            ---
+
+            ### ✨ Fitur Unggulan Versi Ini
+            - ⚡ **Realtime Monitor**: Pantau koneksi per aplikasi, DNS remote host, status soket, dan kecepatan download/upload per detik.
+            - 📈 **Grafik Bandwidth**: Visualisasi kurva lonjakan traffic jaringan secara realtime.
+            - 📜 **History & Forensik**: Seluruh riwayat koneksi tersimpan di database lokal SQLite tanpa upload ke server luar.
+            - 🧹 **Auto-Cleanup & Retensi**: Atur masa simpan log history dari 7 hari hingga selamanya.
+            - 🎨 **Dark & Light Mode**: Desain modern, frameless, dan nyaman di mata.
+
+            ---
+
+            ### 💻 Kebutuhan Sistem
+            - Windows 10 atau Windows 11 (64-bit)
+            - Runtime WebView2 sudah diikutsertakan (Offline Installer)
           draft: false
           prerelease: false
           files: |
